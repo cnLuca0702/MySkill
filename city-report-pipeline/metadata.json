@@ -1,0 +1,12 @@
+{
+  "name": "city-report-pipeline",
+  "version": "1.0.0",
+  "description": "Orchestration skill: invokes city-research-deep for initial draft, then multi-search-engine for deep enrichment, and exports the final report as both Markdown and DOCX files.",
+  "type": "orchestration",
+  "depends_on": [
+    "city-research-deep",
+    "multi-search-engine"
+  ],
+  "requires_api_key": false,
+  "output_formats": ["md", "docx"]
+}
