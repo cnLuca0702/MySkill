@@ -1,17 +1,18 @@
 ---
 name: "city-report-pipeline"
-description: "编排技能：调用 city-research-deep 生成城市调研初稿，再调用 multi-search-engine 对初稿进行全面深度充实，最终输出 Markdown 和 DOCX 双格式报告。"
+description: "编排技能：调用 city-research-deep 生成城市调研初稿，再调用 multi-search-engine 对初稿进行全面深度充实，最终输出 Markdown 和 DOCX 双格式报告，并调用 ima 技能将终稿同步为一篇新的 IMA 笔记。"
 ---
 
 # 城市调研报告完整流水线技能
 
 ## 技能概述
 
-本技能是一个编排型（Orchestration）技能，通过顺序调用两个子技能，完成从数据收集到报告输出的完整闭环：
+本技能是一个编排型（Orchestration）技能，通过顺序调用三个子技能，完成从数据收集到多端报告输出的完整闭环：
 
 1. **第一阶段**：调用 `city-research-deep` 技能，完成系统化数据收集与9章初稿撰写
 2. **第二阶段**：调用 `multi-search-engine` 技能，对初稿逐章进行全面深度充实完善
 3. **第三阶段**：将最终报告同时输出为 `.md` 和 `.docx` 两种格式
+4. **第四阶段**：调用 `ima` 技能，将终稿同步创建为一篇新的 IMA 笔记
 
 **核心约束：**
 - 充实完善过程中，文字风格严格保持与初稿一致（专业、数据化、无列表符号、无表格、无emoji）
@@ -226,6 +227,97 @@ sudo apt-get install pandoc
 
 ---
 
+## 第四阶段：调用 ima 技能同步笔记
+
+### 4.1 凭证预检
+
+调用 IMA API 前，先确认环境变量已配置：
+
+```bash
+if [ -z "$IMA_OPENAPI_CLIENTID" ] || [ -z "$IMA_OPENAPI_APIKEY" ]; then
+  echo "缺少 IMA 凭证，请配置环境变量 IMA_OPENAPI_CLIENTID 和 IMA_OPENAPI_APIKEY"
+  echo "获取地址：https://ima.qq.com/agent-interface"
+  exit 1
+fi
+```
+
+如果凭证未配置，向用户说明情况并跳过本阶段，不影响前三阶段的输出结果。
+
+### 4.2 定义 API 调用函数
+
+```bash
+ima_api() {
+  local endpoint="$1" body="$2"
+  curl -s -X POST "https://ima.qq.com/openapi/note/v1/$endpoint" \
+    -H "ima-openapi-clientid: $IMA_OPENAPI_CLIENTID" \
+    -H "ima-openapi-apikey: $IMA_OPENAPI_APIKEY" \
+    -H "Content-Type: application/json" \
+    -d "$body"
+}
+```
+
+### 4.3 新建 IMA 笔记
+
+笔记标题与文件保持一致：`{城市名称}_调研报告_{YYYY-MM-DD}`。
+
+内容来源：直接使用第三阶段已写入的 Markdown 文件内容，确保笔记与本地文件完全一致。
+
+读取文件内容时，必须保证 UTF-8 编码：
+
+```bash
+content=$(python3 -c "
+import sys
+data = open('{城市名称}_调研报告_{YYYY-MM-DD}.md', 'rb').read()
+for enc in ['utf-8', 'gbk', 'gb2312', 'latin-1']:
+    try:
+        sys.stdout.write(data.decode(enc))
+        break
+    except (UnicodeDecodeError, LookupError):
+        continue
+" 2>/dev/null)
+```
+
+调用 `import_doc` 新建笔记：
+
+```bash
+body=$(python3 -c "
+import json, sys
+content = open('{城市名称}_调研报告_{YYYY-MM-DD}.md', encoding='utf-8').read()
+print(json.dumps({'content_format': 1, 'content': content}))
+")
+ima_api "import_doc" "$body"
+```
+
+### 4.4 超限分段写入
+
+若 `import_doc` 返回错误码 `100009`（内容超过大小限制），改为分段写入：
+
+1. 先用报告标题和第一章内容新建笔记（获取 `doc_id`）
+2. 再逐章调用 `append_doc` 追加剩余章节
+
+```bash
+# 步骤1：新建笔记（仅含标题和第1章）
+first_part="# {城市名称}调研报告\n\n{第1章完整内容}"
+create_body=$(python3 -c "import json; print(json.dumps({'content_format': 1, 'content': '$first_part'}))")
+result=$(ima_api "import_doc" "$create_body")
+doc_id=$(echo "$result" | python3 -c "import json,sys; print(json.load(sys.stdin)['doc_id'])")
+
+# 步骤2：逐章追加（第2章至第9章）
+for chapter_content in "{第2章}" "{第3章}" ... "{第9章}"; do
+  append_body=$(python3 -c "import json; print(json.dumps({'doc_id': '$doc_id', 'content_format': 1, 'content': '$chapter_content'}))")
+  ima_api "append_doc" "$append_body"
+done
+```
+
+### 4.5 笔记创建完成确认
+
+笔记成功创建后，向用户报告：
+- 笔记标题
+- IMA 笔记 `doc_id`
+- 提示用户可在 https://ima.qq.com 中查看
+
+---
+
 ## 完整执行流程总览
 
 ```
@@ -255,7 +347,12 @@ sudo apt-get install pandoc
   · {城市名称}_调研报告_{日期}.md
   · {城市名称}_调研报告_{日期}.docx
         ↓
-向用户报告文件路径与字数统计
+【第四阶段】ima 技能同步笔记
+  · 凭证预检（IMA_OPENAPI_CLIENTID / IMA_OPENAPI_APIKEY）
+  · import_doc 新建笔记（超限时分章 append_doc 追加）
+  · 返回笔记 doc_id，提示用户在 ima.qq.com 查看
+        ↓
+向用户汇总：文件路径 + 字数统计 + IMA 笔记链接
 ```
 
 ---
@@ -267,6 +364,8 @@ sudo apt-get install pandoc
 3. **数据一致性**：如充实阶段发现与初稿数据矛盾，以可信度更高的来源为准，并在报告中注明数据差异
 4. **文件写入**：Markdown 文件须在第二阶段充实完成后一次性写入，确保是最终版本
 5. **pandoc 转换**：DOCX 转换失败时，须向用户说明原因，并提供 Markdown 文件作为替代交付物
+6. **ima 凭证缺失**：若 IMA 环境变量未配置，第四阶段跳过，前三阶段输出结果不受影响，并向用户说明跳过原因及配置方法
+7. **ima 内容一致性**：IMA 笔记内容必须与本地 Markdown 文件完全一致，直接读取文件写入，不得手动拼接或修改
 
 ---
 
@@ -274,6 +373,7 @@ sudo apt-get install pandoc
 
 - `city-research-deep`：城市调研初稿生成
 - `multi-search-engine`：多搜索引擎数据补充
+- `ima`：IMA 笔记同步（需配置 `IMA_OPENAPI_CLIENTID` 和 `IMA_OPENAPI_APIKEY`）
 
 ---
 
@@ -284,4 +384,4 @@ MIT
 ---
 
 *最后更新：2026-03-21*
-*版本：1.0.0*
+*版本：1.1.0*
