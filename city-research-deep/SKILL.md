@@ -1,5 +1,5 @@
 ---
-name: "comprehensive-city-research"
+name: "city-research-deep"
 description: "Comprehensive city research with multi-search engine integration (17 engines) and structured report generation. Combines multi-search-engine and city-research capabilities for in-depth city analysis."
 ---
 
